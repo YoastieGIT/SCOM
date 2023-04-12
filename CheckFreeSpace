@@ -1,0 +1,452 @@
+Option Explicit
+
+Dim TargetComputer
+Dim objAPI
+Set objAPI = CreateObject("MOM.ScriptAPI")
+
+Dim THRESHOLD_PCT_RED
+Dim THRESHOLD_PCT_YELLOW
+Dim THRESHOLD_SYSTEM_PCT_RED
+Dim THRESHOLD_SYSTEM_PCT_YELLOW	
+
+Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5447, EVENT_TYPE_INFORMATION , "Script Start.")
+
+Const BYTES_IN_MB 		= 1048576 '=2^20
+Const BYTES_IN_GB 		= 1073741824
+Const LOCAL 			= 3
+Const EVENT_TYPE_ERROR 		= 1
+Const EVENT_TYPE_WARNING 	= 2
+Const EVENT_TYPE_INFORMATION 	= 4
+
+Call Main
+
+Sub Main()
+
+	Dim DiskLabel
+	Dim oArgs
+	Set oArgs = WScript.Arguments
+	if oArgs.Count <> 6 Then
+	Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5446, EVENT_TYPE_INFORMATION , " Not Enough Arguments to start script")
+	   WScript.Quit
+	End If
+
+	THRESHOLD_SYSTEM_PCT_RED = oArgs(0)
+	THRESHOLD_SYSTEM_PCT_YELLOW = oArgs(1)
+	THRESHOLD_PCT_RED = oArgs(2)
+	THRESHOLD_PCT_YELLOW = oArgs(3)
+	TargetComputer = oArgs(4)
+	DiskLabel = oArgs(5)
+	
+    Dim oAPI, oBag
+    Set oAPI = MOMCreateObject("MOM.ScriptAPI")
+    If Err.number <> 0 Or IsNull(oAPI) or IsEmpty(oAPI) Then
+        ThrowScriptError "Error While Creating ScriptAPI object", Err
+        Exit Sub
+    End If
+    set oBag = oAPI.CreatePropertyBag()
+    If Err.number <> 0 Or IsNull(oBag) or IsEmpty(oBag) Then
+        ThrowScriptError "Error While Creating PropertyBag object", Err
+        Exit Sub
+    End If
+
+    Dim IsVolumeInfoSupported 
+
+    IsVolumeInfoSupported = Is_Win32_Volume_Supported()
+    
+    Dim TrakitEmailApplicatiebeheer
+
+    TrakitEmailApplicatiebeheer = Get_Trakit_Email_Applicatiebeheer
+
+    Dim oWmiDiskSet, oWmiDisk
+	
+	If IsVolumeInfoSupported Then 
+		Set oWmiDiskSet = WMIGetInstance("winmgmts:\\" + TargetComputer & "\root\cimv2", "Win32_Volume")
+	Else
+		Set oWmiDiskSet = WMIExecQuery("winmgmts:\\" + TargetComputer & "\root\cimv2", "select * from Win32_LogicalDisk where (DriveType=3 or DriveType=6) and FileSystem!=null")
+	End If
+    
+    If IsObject(oWmiDiskSet) Then
+		For Each oWmiDisk in oWmiDiskSet
+		    'WScript.echo "Disk is " & oWmiDisk.DriveLetter
+            If oWmiDisk.DriveType = LOCAL  Then
+			    Dim sDriveLetter, nFreeSpace, nMaxSize, nPctFree, nMBFree, nMBSize
+                ' Calculate Free Space
+			    nFreeSpace = oWmiDisk.FreeSpace
+			    'WScript.echo "Disk is " & oWmiDisk.DriveLetter & "Free Space is  " & nFreeSpace
+			    
+			    If IsNull(nFreeSpace) Then _
+				    nFreeSpace = 0
+				    
+			    If IsVolumeInfoSupported Then
+				    sDriveLetter = oWmiDisk.DriveLetter
+				    nMaxSize = oWmiDisk.Capacity
+				    If IsNull(sDriveLetter) Then
+					    sDriveLetter  = oWmiDisk.Name
+					    sDriveLetter = Left(sDriveLetter, Len(sDriveLetter)-1)
+				    End If
+			    Else
+				    sDriveLetter = oWmiDisk.DeviceId
+				    nMaxSize = oWmiDisk.Size
+			    End If	
+			    
+    			If StrComp(DiskLabel,sDriveLetter) = 0 Then 'disk label if
+				    If Not IsNull(nMaxSize) And nMaxSize > 0 Then ' disk 
+				    '
+				    ' Drive is formatted - if we dont get a maxsize, dont report on drive
+				    '
+					    nPctFree = Round(nFreeSpace / nMaxSize * 100, 0)
+
+					    nMBFree = Round(nFreeSpace / BYTES_IN_MB, 0)
+
+  	                            nMBSize = Round(nMaxSize / BYTES_IN_GB, 0)
+    				
+					If Not IsDriveExcluded(sDriveLetter) Then 
+						CollectNewThreshold(sDriveLetter)
+						
+    				
+ 					    If nPctFree <= CInt(THRESHOLD_SYSTEM_PCT_RED) And Is_System_Drive(sDriveLetter) Then
+						    oBag.AddValue "State", "BAD"
+					    'WScript.echo "SYSTEM DRIVE STATE BAD percent free space = " & nPctFree & " and threshold is = " & THRESHOLD_SYSTEM_PCT_RED & "."
+					    ElseIf nPctFree <= CInt(THRESHOLD_SYSTEM_PCT_YELLOW) And Is_System_Drive(sDriveLetter) Then
+						    oBag.AddValue "State", "WARNING" 
+						'WScript.echo "SYSTEM DRIVE STATE IS WARNING  percent free space = " & nPctFree & " and threshold is = " & THRESHOLD_SYSTEM_PCT_YELLOW & "."
+					    ElseIf nPctFree <= CInt(THRESHOLD_PCT_RED) And Not Is_System_Drive(sDriveLetter) Then
+						    oBag.AddValue "State", "BAD" 
+						'WScript.echo "NON-SYSTEM DISK STATE IS BAD percent free space = " & nPctFree & " and threshold is = " & THRESHOLD_PCT_RED & "."
+					    ElseIf nPctFree <= CInt(THRESHOLD_PCT_YELLOW) And Not Is_System_Drive(sDriveLetter) Then
+						    oBag.AddValue "State", "WARNING" 
+						'WScript.echo "NON-SYSTEM DISK STATE IS WARNING percent free space = " & nPctFree & " and threshold is = " & THRESHOLD_PCT_YELLOW & "."
+					    Else 
+						    oBag.AddValue "State", "OK" 
+						'WScript.echo "STATE OK percent free space = " & nPctFree & "%"
+					    End If
+					Else
+					' Drive excluded
+					Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5445, EVENT_TYPE_INFORMATION , "\NoDiskAlerts.MOM was detected, " &_
+												"and is being applied to disk " & sDriveLetter & "." &_
+												"Disk " & sDriveLetter & "will not be monitored for free disk space.")
+					End If					    
+					    
+					    
+              oBag.AddValue "PctFree", nPctFree & "" 
+              oBag.AddValue "MBFree", nMBFree & ""
+              oBag.AddValue "MBSize", nMBSize & ""
+              oBag.AddValue "AlertTime", now & ""
+              If Is_System_Drive(sDriveLetter) Then
+                 oBag.AddValue "ThresholdRed", THRESHOLD_SYSTEM_PCT_RED & ""
+                 oBag.AddValue "ThresholdYellow", THRESHOLD_SYSTEM_PCT_YELLOW & ""
+              Else
+                 oBag.AddValue "ThresholdRed", THRESHOLD_PCT_RED & ""
+                 oBag.AddValue "ThresholdYellow", THRESHOLD_PCT_YELLOW & ""
+              End If
+              OBag.AddValue "EmailAppBeheer", TrakitEmailApplicatiebeheer & ""            
+		  oAPI.AddItem oBag
+              oAPI.ReturnItems 
+              Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5448, EVENT_TYPE_INFORMATION , "Script ENDS.")	
+					    Exit Sub
+
+				    Else
+				    '
+				    ' If the MaxSize is 0 or less, then the drive is unformatted.
+				    ' Do not report on unformatted drives
+				    '
+				        WScript.echo "Drive not formatted " & sDriveLetter
+				        ThrowScriptError " * " & sDriveLetter & "  + Drive not formatted." , Err
+				        Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5448, EVENT_TYPE_INFORMATION , "Script ENDS.")	
+				        Exit Sub
+				    End If ' Is Null Check
+			    End If ' Lable Check   
+			End If ' Drive Type 
+		Next
+	End If
+Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5448, EVENT_TYPE_INFORMATION , "Script ENDS.")
+End Sub
+
+Function ThrowScriptErrorNoAbort(ByVal sMessage, ByVal oErr)
+	Dim sErrDescription, sErrNumber
+	sErrDescription = oErr.Description
+	sErrNumber = oErr.Number
+    Wscript.echo "Error Message is " & sErrDescription & " Error number is " & sErrNumber
+End Function
+
+Function ThrowScriptError(Byval sMessage, ByVal oErr)
+    On Error Resume Next
+    ThrowScriptErrorNoAbort sMessage, oErr
+	Quit()
+    On Error goto 0
+End Function
+
+
+Function WMIGetObject(ByVal sNamespace)
+	Dim oWMI
+    Dim e
+    Set e = New Error
+	On Error Resume Next	
+	Set oWMI = GetObject(sNamespace)
+	e.Save
+	On Error Goto 0
+	If IsEmpty(oWMI) Then
+		ThrowScriptError "Unable to open WMI Namespace '" & sNamespace & "'.  Check to see if the WMI service is enabled and running, and ensure this WMI namespace exists.", e
+	End If
+
+	Set WMIGetObject = oWMI
+End Function
+
+Function WMIGetInstance(ByVal sNamespace, ByVal sInstance)
+	Dim oWMI, oInstance, nInstanceCount
+    Dim e
+    Set e = New Error
+	On Error Resume Next
+	Set oWMI = GetObject(sNamespace)
+	e.Save
+	On Error Goto 0
+	If IsEmpty(oWMI) Then
+		ThrowScriptError "Unable to open WMI Namespace '" & sNamespace & "'.  Check to see if the WMI service is enabled and running, and ensure this WMI namespace exists.", e
+	End If
+
+	On Error Resume Next
+	Set oInstance = oWMI.InstancesOf(sInstance)
+	e.Save
+	On Error Goto 0
+	If IsEmpty(oInstance) Or e.Number <> 0 Then
+		ThrowScriptError "The class name '" & sInstance & "' returned no instances.  Please check to see if this is a valid WMI class name.", e
+	End If
+
+	'Determine if we queried a valid WMI class - Count will return 0 or empty
+
+	On Error Resume Next
+	nInstanceCount = oInstance.Count
+	e.Save
+	On Error Goto 0
+	If e.Number <> 0 Then
+		ThrowScriptError "The class name '" & sInstance & "' did not return any valid instances.  Please check to see if this is a valid WMI class name.", e
+	End If
+
+	Set WMIGetInstance = oInstance
+
+End Function
+
+Class Error
+    Private m_lNumber
+    Private m_sSource
+    Private m_sDescription
+    Private m_sHelpContext
+    Private m_sHelpFile
+    Public Sub Save()
+        m_lNumber = Err.number
+        m_sSource = Err.Source
+        m_sDescription = Err.Description
+        m_sHelpContext = Err.HelpContext
+        m_sHelpFile = Err.helpfile
+    End Sub
+    Public Sub Raise()
+        Err.Raise m_lNumber, m_sSource, m_sDescription, m_sHelpFile, m_sHelpContext
+    End Sub
+    Public Sub Clear()
+        m_lNumber = 0
+        m_sSource = ""
+        m_sDescription = ""
+        m_sHelpContext = ""
+        m_sHelpFile = ""
+    End Sub
+    Public Default Property Get Number()
+        Number = m_lNumber
+    End Property
+    Public Property Get Source()
+        Source = m_sSource
+    End Property
+    Public Property Get Description()
+        Description = m_sDescription
+    End Property
+    Public Property Get HelpContext()
+        HelpContext = m_sHelpContext
+    End Property
+    Public Property Get HelpFile()
+        HelpFile = m_sHelpFile
+    End Property    
+End Class
+
+Function MomCreateObject(ByVal sProgramId)
+    Dim oError
+    Set oError = New Error
+    
+	On Error Resume Next
+	Set MomCreateObject = CreateObject(sProgramId)
+	oError.Save
+	On Error Goto 0
+	
+	If oError.Number <> 0 Then ThrowScriptError "Unable to create automation object '" & sProgramId & "'", oError
+End Function
+
+Function IsValidObject(ByVal oObject)
+    IsValidObject = False
+    
+    If IsObject(oObject) Then
+        If Not oObject Is Nothing Then
+            IsValidObject = True
+        End If
+    End If
+End Function	
+
+Function WMIExecQuery(ByVal sNamespace, ByVal sQuery)
+	Dim oWMI, oQuery, nInstanceCount
+	Dim e
+	Set e = New Error
+	On Error Resume Next
+	Set oWMI = GetObject(sNamespace)
+	e.Save
+	On Error Goto 0
+	If IsEmpty(oWMI) Then
+		ThrowScriptError "Unable to open WMI Namespace '" & sNamespace & "'.  Check to see if the WMI service is enabled and running, and ensure this WMI namespace exists.", e
+	End If
+
+	On Error Resume Next
+	Set oQuery = oWMI.ExecQuery(sQuery)
+	e.Save
+	On Error Goto 0
+	If IsEmpty(oQuery) Or e.Number <> 0 Then
+		ThrowScriptError "The Query '" & sQuery & "' returned an invalid result set.  Please check to see if this is a valid WMI Query.", e
+	End If
+
+	'Determine if we queried a valid WMI class - Count will return 0 or empty
+	On Error Resume Next
+	nInstanceCount = oQuery.Count
+	e.Save
+	On Error Goto 0
+	If e.Number <> 0 Then
+		ThrowScriptError "The Query '" & sQuery & "' did not return any valid instances.  Please check to see if this is a valid WMI Query.", e
+	End If
+
+	Set WMIExecQuery = oQuery
+
+End Function
+
+
+Function Is_Win32_Volume_Supported()
+	Dim objWMISet, objWMIOS, blnRet
+
+	blnRet = False
+	Set objWMISet = WMIGetInstance("winmgmts:\\" & TargetComputer & "\root\cimv2", "Win32_OperatingSystem")
+	For each objWMIOS in objWMISet
+		If CLng(objWMIOS.BuildNumber) >= 3624 Then blnRet = True
+	Next
+	Is_Win32_Volume_Supported = blnRet
+End Function
+
+Function Is_System_Drive(sDriveLetter)
+	Dim objWMISet, objWMIOS
+	Is_System_Drive = False
+
+	Set objWMISet = WMIGetInstance("winmgmts:\\" & TargetComputer & "\root\cimv2", "Win32_OperatingSystem")
+	For each objWMIOS in objWMISet
+		Dim sSystemDrive
+		sSystemDrive = Left(objWMIOS.SystemDirectory, 2)
+		If sSystemDrive = sDriveLetter Then
+			Is_System_Drive = True
+		End If
+	Next
+End Function
+
+Function Get_Trakit_Email_Applicatiebeheer()
+	Dim objWMISet, objWMITrakit, Email_Applicatiebeheer, Email_contact_A
+	Get_Trakit_Email_Applicatiebeheer = "Onbekend"
+	On Error Resume Next
+	Set objWMISet = WMIGetInstance("winmgmts:\\" & TargetComputer & "\root\cimv2", "UMC_Trakit_Info")
+		For each objWMITrakit in objWMISet
+			Email_Applicatiebeheer = objWMITrakit.Email_applicatiebeheer
+			Email_contact_A = objWMITrakit.Email_contact_A
+		Next
+	On Error Goto 0	
+	IF Email_contact_A = "Onbekend" Then 
+		Get_Trakit_Email_Applicatiebeheer = Email_Applicatiebeheer
+	ElseIf Email_contact_A <> "" Then 
+		Get_Trakit_Email_Applicatiebeheer = Email_Applicatiebeheer & ";" & Email_contact_A
+	ELSE
+		Get_Trakit_Email_Applicatiebeheer = Email_Applicatiebeheer
+	End If
+End Function
+
+Function CollectNewThreshold(sDriveLetter)
+
+	Dim oThresholdFile
+	Dim sThresholdFile
+	Dim sThresholds
+	Dim oFSO
+	Dim aArray
+	Dim aArray2
+
+	sThresholdFile = sDriveLetter & "\DiskThreshold.MOM"
+	Set oFSO = CreateObject("Scripting.FileSystemObject")
+		
+	If oFSO.FileExists(sThresholdFile) Then
+		Set oThresholdFile = oFSO.OpenTextFile(sThresholdFile, 1)
+       	On Error Resume Next
+       	sThresholds = oThresholdFile.ReadAll
+		aArray = Split(sThresholds, vbcrlf)
+		oThresholdFile.Close
+		On Error goto 0
+		Set oFSO = Nothing
+		If Ubound(aArray) => 0 Then 'If the file has contents, continue ' gjm 10-22-2007- change to Ubound(aArray) = > 0 instead of Ubound(aArray) = 1
+                			aArray2 = Split(aArray(0), ",")
+Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5449, EVENT_TYPE_INFORMATION , "Using CollectNewThreshold function.")
+
+
+			If Ubound(aArray2) = 1 Then 'If the file has parm1,parm2, continue
+                        		If aArray2(0) =>100 Or  aArray2(1) =>100 Then 'percentage thresholds greater than 100-oops!
+					Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5441, EVENT_TYPE_ERROR , "\DiskThreshold.MOM (first or second value)" &_
+					 							"for drive " & sDriveLetter & " has a percentage threshold greater than or equal to 100." &_ 
+												"Value must be LESS than 100. File contents (single line) MUST be entered as follows: " &_
+												"CriticalPercentThreshold,WarningPercentThreshold.")
+		 			CollectNewThreshold = False
+		 		Else
+			 		CollectNewThreshold = True
+					If Is_System_Drive(sDriveLetter) Then
+						THRESHOLD_SYSTEM_PCT_RED = aArray2(0)
+						THRESHOLD_SYSTEM_PCT_YELLOW = aArray2(1)
+						Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5444, EVENT_TYPE_INFORMATION , "\DiskThreshold.MOM was detected, " &_
+													"and is being applied to disk " & sDriveLetter & ".")
+					Else
+						THRESHOLD_PCT_RED  = aArray2(0)
+						THRESHOLD_PCT_YELLOW  = aArray2(1)
+						Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5444, EVENT_TYPE_INFORMATION , "\DiskThreshold.MOM was detected, " &_
+													"and is being applied to disk " & sDriveLetter & ".")
+					End If
+				End If
+			Else
+				'Incorrect number of threshold parameters in file
+					Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5442, EVENT_TYPE_ERROR , "\DiskThreshold.MOM was detected, " &_
+												"but the correct number of thresholds have not been defined. " &_
+												"For drive " & sDriveLetter & " Remove File or correct thresholds." &_
+												"File contents (single line) MUST be entered as follows: CriticalPercentThreshold,WarningPercentThreshold.")
+	
+		 		CollectNewThreshold = False
+		 	End If
+		 Else
+		 	'File Exists, but no thresholds defined.
+		 	Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5443, EVENT_TYPE_ERROR , "\DiskThreshold.MOM was detected, " &_
+										"but appears to be empty. File contents (single line) MUST be entered " &_
+										"as follows: CriticalPercentThreshold,WarningPercentThreshold.")
+		 End If
+	Else
+		' No File
+		CollectNewThreshold = False
+	End If
+End Function
+
+Function IsDriveExcluded(sDriveLetter)
+	Dim sExcludeFile
+	Dim oFSO
+	
+	IsDriveExcluded = False
+	sExcludeFile = sDriveLetter & "\NoDiskAlerts.MOM"
+	Set oFSO = CreateObject("Scripting.FileSystemObject")
+
+	If oFSO.FileExists(sExcludeFile) Then
+		IsDriveExcluded = True
+Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5450, EVENT_TYPE_INFORMATION , "Using Drive excluded Function")
+	Else
+		IsDriveExcluded = False
+	End If
+	
+	Set oFSO = Nothing
+End Function
