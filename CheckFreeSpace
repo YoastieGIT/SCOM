@@ -1,3 +1,17 @@
+'Copyright (c) Microsoft Corporation. All rights reserved.
+' Scott Moss 5/11/2008
+' Frank Wijten versie 1.1 06 feb 2012
+' Bob Cornelissen Adjustments to script and MP, June 2014
+' SCOM Free Space Script only uses percentage free to determine if an alert should be fired off.
+' If the file NoDiskAlerts.MOM exists on the root of a drive, no alerts will be generated about that disk.
+' If the file DiskThreshold.MOM exists on the root of a drive, the two parameters in the file will be used to monitor that disk.
+' DiskThreshold.MOM format, Single line in file should contain RedAlertPercentvalue,YellowAlertPercentvalue Example:
+' 3,10
+' This would be a 3% threshold for RED (critical) alerts, and 10% threshold for YELLOW (warning) alerts
+' The following 2 functions were added from Gerald Mims: IsDriveExcluded and CollectNewThreshold
+'
+
+
 Option Explicit
 
 Dim TargetComputer
@@ -163,6 +177,11 @@ Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5448, EVENT_TYPE_INFORMATIO
 End Sub
 
 Function ThrowScriptErrorNoAbort(ByVal sMessage, ByVal oErr)
+'
+' ThrowScriptError :: Creates an event and sends it back to the scom server
+'
+'
+
 	Dim sErrDescription, sErrNumber
 	sErrDescription = oErr.Description
 	sErrNumber = oErr.Number
@@ -170,6 +189,10 @@ Function ThrowScriptErrorNoAbort(ByVal sMessage, ByVal oErr)
 End Function
 
 Function ThrowScriptError(Byval sMessage, ByVal oErr)
+'
+' ThrowScriptError :: Creates an event and sends it back to the scom server
+'
+'
     On Error Resume Next
     ThrowScriptErrorNoAbort sMessage, oErr
 	Quit()
@@ -178,6 +201,10 @@ End Function
 
 
 Function WMIGetObject(ByVal sNamespace)
+'
+' WMIGetObject :: Returns the WMI object requested.
+'
+'
 	Dim oWMI
     Dim e
     Set e = New Error
@@ -190,9 +217,16 @@ Function WMIGetObject(ByVal sNamespace)
 	End If
 
 	Set WMIGetObject = oWMI
+
 End Function
 
+
+
 Function WMIGetInstance(ByVal sNamespace, ByVal sInstance)
+'
+' WMIGetInstance :: Returns WMI Instance requested.
+'
+'
 	Dim oWMI, oInstance, nInstanceCount
     Dim e
     Set e = New Error
@@ -289,6 +323,10 @@ Function IsValidObject(ByVal oObject)
 End Function	
 
 Function WMIExecQuery(ByVal sNamespace, ByVal sQuery)
+'
+' WMIExecQuery :: Executes the WMI query and returns the result set.
+'
+'
 	Dim oWMI, oQuery, nInstanceCount
 	Dim e
 	Set e = New Error
@@ -366,6 +404,17 @@ Function Get_Trakit_Email_Applicatiebeheer()
 	End If
 End Function
 
+' VBScript source code
+
+'*********************************************************************
+' Routine: Function CollectNewThreshold(sDriveLetter)
+' Purpose: Checks for the file DiskThreshold.MOM existing on the drive that the threshold needs to be changed on.
+'	This file should contain alert threshold values for that drive.
+'	Single line in file should contain RedAlertPercentvalue,YellowAlertPercentvalue
+'	EXAMPLE:  3,10
+'	This would be a 3% threshold for RED (critical) alerts, and 10% threshold for YELLOW (warning) alerts
+'**********************************************************************
+
 Function CollectNewThreshold(sDriveLetter)
 
 	Dim oThresholdFile
@@ -432,6 +481,14 @@ Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5449, EVENT_TYPE_INFORMATIO
 		CollectNewThreshold = False
 	End If
 End Function
+
+
+'*********************************************************************
+' Routine: Function IsDriveExcluded(sDriveLetter)
+' Purpose: To determine if drive is exclude or not.
+'	   If a file named NoDiskAlerts.MOM exists on the drive, then exclude
+'			
+'**********************************************************************
 
 Function IsDriveExcluded(sDriveLetter)
 	Dim sExcludeFile
