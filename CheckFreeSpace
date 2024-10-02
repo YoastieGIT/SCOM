@@ -1,505 +1,200 @@
-' SCOM Free Space Script only uses percentage free to determine if an alert should be fired off.
-' If the file NoDiskAlerts.MOM exists on the root of a drive, no alerts will be generated about that disk.
-' If the file DiskThreshold.MOM exists on the root of a drive, the two parameters in the file will be used to monitor that disk.
-' DiskThreshold.MOM format, Single line in file should contain RedAlertPercentvalue,YellowAlertPercentvalue Example:
-' 3,10
-' This would be a 3% threshold for RED (critical) alerts, and 10% threshold for YELLOW (warning) alerts
-' The following 2 functions were added from Gerald Mims: IsDriveExcluded and CollectNewThreshold
-'
+param ([string]$driveLetter, [int]$DefaultSystemDriveWarningAbsolute, [int]$DefaultSystemDriveErrorAbsolute)
 
+#=================================================================================
+# Assign script name variable for use in event logging.
+$ScriptName = "checkFreeDiskSpace.ps1"
+$EventID = "100"
+$ErrorEventID = "101"
+#=================================================================================
 
-Option Explicit
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+# Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject "MOM.ScriptAPI"
+# Initialize a list to store error messages
+$script:ErrorMessages = @()
+# Initialize a list to store script output
+$script:ScriptOutput = @()
+# Log script event that we are starting the task
+$script:ScriptOutput += "`nRunning as ($whoami)."
+$script:ScriptOutput += "`nChecking drive $driveLetter"
+#=================================================================================
 
-Dim TargetComputer
-Dim objAPI
-Set objAPI = CreateObject("MOM.ScriptAPI")
+#=================================================================================
+# Load SCOM PropertyBag function
+$propertyBag = $momapi.CreatePropertyBag()
+#=================================================================================
 
-Dim THRESHOLD_PCT_RED
-Dim THRESHOLD_PCT_YELLOW
-Dim THRESHOLD_SYSTEM_PCT_RED
-Dim THRESHOLD_SYSTEM_PCT_YELLOW	
+# Begin MAIN script section
+#=================================================================================
+$NoAlertFile = "NoDiskAlerts.MOM"
+$DefaultDriveWarningPercentage = 10
+$DefaultDriveErrorPercentage = 5
 
-Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5447, EVENT_TYPE_INFORMATION , "Script Start.")
+function Check-DriveSpace {
+    param (
+        [PSCustomObject]$disk,
+        [string]$Drive,
+        [int]$WarningPercentageThreshold,
+        [int]$ErrorPercentageThreshold,
+        [int64]$WarningAbsoluteThreshold,
+        [int64]$ErrorAbsoluteThreshold
+    )
 
-Const BYTES_IN_MB 		= 1048576 '=2^20
-Const BYTES_IN_GB 		= 1073741824
-Const LOCAL 			= 3
-Const EVENT_TYPE_ERROR 		= 1
-Const EVENT_TYPE_WARNING 	= 2
-Const EVENT_TYPE_INFORMATION 	= 4
+    if ($disk.TotalSpace -eq 0) {
+        $script:ErrorMessages += "`nDrive $Drive cannot be checked."
+        return $null
+    }
 
-Call Main
+    $percentFree = ($disk.FreeSpace / $disk.TotalSpace) * 100
+    $state = "Healthy"
 
-Sub Main()
-
-	Dim DiskLabel
-	Dim oArgs
-	Set oArgs = WScript.Arguments
-	if oArgs.Count &lt;&gt; 6 Then
-	Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5446, EVENT_TYPE_INFORMATION , " Not Enough Arguments to start script")
-	   WScript.Quit
-	End If
-
-	THRESHOLD_SYSTEM_PCT_RED = oArgs(0)
-	THRESHOLD_SYSTEM_PCT_YELLOW = oArgs(1)
-	THRESHOLD_PCT_RED = oArgs(2)
-	THRESHOLD_PCT_YELLOW = oArgs(3)
-	TargetComputer = oArgs(4)
-	DiskLabel = oArgs(5)
-	
-    Dim oAPI, oBag
-    Set oAPI = MOMCreateObject("MOM.ScriptAPI")
-    If Err.number &lt;&gt; 0 Or IsNull(oAPI) or IsEmpty(oAPI) Then
-        ThrowScriptError "Error While Creating ScriptAPI object", Err
-        Exit Sub
-    End If
-    set oBag = oAPI.CreatePropertyBag()
-    If Err.number &lt;&gt; 0 Or IsNull(oBag) or IsEmpty(oBag) Then
-        ThrowScriptError "Error While Creating PropertyBag object", Err
-        Exit Sub
-    End If
-
-    Dim IsVolumeInfoSupported 
-
-    IsVolumeInfoSupported = Is_Win32_Volume_Supported()
+    if ($disk.BootDisk -eq $False -and $percentFree -lt $ErrorPercentageThreshold) {
+		$script:ErrorMessages += "`nDrive $Drive is below percentage error threshold: $([math]::Round($percentFree, 2))% free, $($disk.FreeSpace) GB free."
+        $state = "Error"
+    }
+    elseif ($disk.BootDisk -eq $False -and $percentFree -lt $WarningPercentageThreshold) {
+        $script:ErrorMessages += "`nDrive $Drive is below percentage warning threshold: $([math]::Round($percentFree, 2))% free, $($disk.FreeSpace) GB free."
+        $state = "Warning"
+    }
     
-    Dim TrakitEmailApplicatiebeheer
+    if ($disk.BootDisk -eq $True -and $disk.FreeSpace -lt $ErrorAbsoluteThreshold) {
+        $script:ErrorMessages += "`nDrive $Drive is below absolute error threshold: $([math]::Round($percentFree, 2))% free, $($disk.FreeSpace) GB free."
+        $state = "Error"
+    }
+    elseif ($disk.BootDisk -eq $True -and $disk.FreeSpace -lt $WarningAbsoluteThreshold) {
+        $script:ErrorMessages += "`nDrive $Drive is below absolute warning threshold: $([math]::Round($percentFree, 2))% free, $($disk.FreeSpace) GB free."
+        $state = "Warning"
+    }
 
-    TrakitEmailApplicatiebeheer = Get_Trakit_Email_Applicatiebeheer
+    return $state, $percentFree
+}
 
-    Dim oWmiDiskSet, oWmiDisk
-	
-	If IsVolumeInfoSupported Then 
-		Set oWmiDiskSet = WMIGetInstance("winmgmts:\\" + TargetComputer &amp; "\root\cimv2", "Win32_Volume")
-	Else
-		Set oWmiDiskSet = WMIExecQuery("winmgmts:\\" + TargetComputer &amp; "\root\cimv2", "select * from Win32_LogicalDisk where (DriveType=3 or DriveType=6) and FileSystem!=null")
-	End If
+function Get-Drive {
+    $disks = @()
+
+    foreach($disk in Get-CimInstance Win32_Diskdrive) {
+        $diskMetadata = Get-Disk | Where-Object { $_.Number -eq $disk.Index } | Select-Object -First 1
+        $partitions = Get-CimAssociatedInstance -ResultClassName Win32_DiskPartition -InputObject $disk
+
+        foreach($partition in $partitions) {
+            $drives = Get-CimAssociatedInstance -ResultClassName Win32_LogicalDisk -InputObject $partition
+
+            foreach($drive in $drives) {
+                $totalSpace = [math]::Round($drive.Size / 1GB, 3)
+                $freeSpace  = [math]::Round($drive.FreeSpace / 1GB, 3)
+                $usedSpace  = [math]::Round($totalSpace - $freeSpace, 3)
+
+                $volume     = Get-Volume | Where-Object { $_.DriveLetter -eq $drive.DeviceID.Trim(":") } | Select-Object -First 1
+                
+                $disks += [PSCustomObject]@{
+                    DriveLetter = $drive.DeviceID
+                    BootDisk    = $diskMetadata.BootFromDisk
+                    TotalSpace  = $totalSpace
+                    FreeSpace   = $freeSpace
+                    UsedSpace   = $usedSpace
+                }
+            }
+        }
+    }
+
+    return $disks
+}
+
+function Get-DriveThresholds {
+    param ([string]$driveLetter)
+
+    $thresholds = @{
+        "WarningPercentage" = $DefaultDriveWarningPercentage
+        "ErrorPercentage" = $DefaultDriveErrorPercentage
+    }
+    $thresholdFile = "$driveLetter\DiskThreshold.MOM"
     
-    If IsObject(oWmiDiskSet) Then
-		For Each oWmiDisk in oWmiDiskSet
-		    'WScript.echo "Disk is " &amp; oWmiDisk.DriveLetter
-            If oWmiDisk.DriveType = LOCAL  Then
-			    Dim sDriveLetter, nFreeSpace, nMaxSize, nPctFree, nMBFree, nMBSize
-                ' Calculate Free Space
-			    nFreeSpace = oWmiDisk.FreeSpace
-			    'WScript.echo "Disk is " &amp; oWmiDisk.DriveLetter &amp; "Free Space is  " &amp; nFreeSpace
-			    
-			    If IsNull(nFreeSpace) Then _
-				    nFreeSpace = 0
-				    
-			    If IsVolumeInfoSupported Then
-				    sDriveLetter = oWmiDisk.DriveLetter
-				    nMaxSize = oWmiDisk.Capacity
-				    If IsNull(sDriveLetter) Then
-					    sDriveLetter  = oWmiDisk.Name
-					    sDriveLetter = Left(sDriveLetter, Len(sDriveLetter)-1)
-				    End If
-			    Else
-				    sDriveLetter = oWmiDisk.DeviceId
-				    nMaxSize = oWmiDisk.Size
-			    End If	
-			    
-    			If StrComp(DiskLabel,sDriveLetter) = 0 Then 'disk label if
-				    If Not IsNull(nMaxSize) And nMaxSize &gt; 0 Then ' disk 
-				    '
-				    ' Drive is formatted - if we dont get a maxsize, dont report on drive
-				    '
-					    nPctFree = Round(nFreeSpace / nMaxSize * 100, 0)
+    if (Test-Path $thresholdFile) {
+        $lines = Get-Content $thresholdFile
+        foreach ($line in $lines) {
+            # Check for the correct format (key = value)
+            if ($line -match "^(\S+)\s*=\s*(\d+)$") {
+                $key = $matches[1]
+                $value = [int]$matches[2]
 
-					    nMBFree = Round(nFreeSpace / BYTES_IN_MB, 0)
+                # Validate that the key is one of the expected keys
+                if ($key -eq "WarningPercentage" -or $key -eq "ErrorPercentage") {
+                    # Check if the value is between 1 and 99
+                    if ($value -ge 1 -and $value -le 99) {
+                        $thresholds[$key] = $value
+                    }
+                    else {
+                        $script:ErrorMessages += "`nInvalid value '$value' for key '$key' in threshold file for drive $driveLetter. Must be between 1 and 99. Using default value."
+                    }
+                }
+                else {
+                    $script:ErrorMessages += "`nInvalid key '$key' in threshold file for drive $driveLetter. Using default value."
+                }
+            }
+            else {
+                # Log an error if the line is not in the correct format
+                $script:ErrorMessages += "`nInvalid format in threshold file for drive $driveLetter. Line: '$line'. Using default thresholds."
+            }
+        }
+    }
+    return $thresholds
+}
 
-  	                            nMBSize = Round(nMaxSize / BYTES_IN_GB, 0)
-    				
-					If Not IsDriveExcluded(sDriveLetter) Then 
-						CollectNewThreshold(sDriveLetter)
-						
-    				
- 					    If nPctFree &lt;= CInt(THRESHOLD_SYSTEM_PCT_RED) And Is_System_Drive(sDriveLetter) Then
-						    oBag.AddValue "State", "BAD"
-					    'WScript.echo "SYSTEM DRIVE STATE BAD percent free space = " &amp; nPctFree &amp; " and threshold is = " &amp; THRESHOLD_SYSTEM_PCT_RED &amp; "."
-					    ElseIf nPctFree &lt;= CInt(THRESHOLD_SYSTEM_PCT_YELLOW) And Is_System_Drive(sDriveLetter) Then
-						    oBag.AddValue "State", "WARNING" 
-						'WScript.echo "SYSTEM DRIVE STATE IS WARNING  percent free space = " &amp; nPctFree &amp; " and threshold is = " &amp; THRESHOLD_SYSTEM_PCT_YELLOW &amp; "."
-					    ElseIf nPctFree &lt;= CInt(THRESHOLD_PCT_RED) And Not Is_System_Drive(sDriveLetter) Then
-						    oBag.AddValue "State", "BAD" 
-						'WScript.echo "NON-SYSTEM DISK STATE IS BAD percent free space = " &amp; nPctFree &amp; " and threshold is = " &amp; THRESHOLD_PCT_RED &amp; "."
-					    ElseIf nPctFree &lt;= CInt(THRESHOLD_PCT_YELLOW) And Not Is_System_Drive(sDriveLetter) Then
-						    oBag.AddValue "State", "WARNING" 
-						'WScript.echo "NON-SYSTEM DISK STATE IS WARNING percent free space = " &amp; nPctFree &amp; " and threshold is = " &amp; THRESHOLD_PCT_YELLOW &amp; "."
-					    Else 
-						    oBag.AddValue "State", "OK" 
-						'WScript.echo "STATE OK percent free space = " &amp; nPctFree &amp; "%"
-					    End If
-					Else
-					' Drive excluded
-					Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5445, EVENT_TYPE_INFORMATION , "\NoDiskAlerts.MOM was detected, " &amp;_
-												"and is being applied to disk " &amp; sDriveLetter &amp; "." &amp;_
-												"Disk " &amp; sDriveLetter &amp; "will not be monitored for free disk space.")
-					End If					    
-					    
-					    
-              oBag.AddValue "PctFree", nPctFree &amp; "" 
-              oBag.AddValue "MBFree", nMBFree &amp; ""
-              oBag.AddValue "MBSize", nMBSize &amp; ""
-              oBag.AddValue "AlertTime", now &amp; ""
-              If Is_System_Drive(sDriveLetter) Then
-                 oBag.AddValue "ThresholdRed", THRESHOLD_SYSTEM_PCT_RED &amp; ""
-                 oBag.AddValue "ThresholdYellow", THRESHOLD_SYSTEM_PCT_YELLOW &amp; ""
-              Else
-                 oBag.AddValue "ThresholdRed", THRESHOLD_PCT_RED &amp; ""
-                 oBag.AddValue "ThresholdYellow", THRESHOLD_PCT_YELLOW &amp; ""
-              End If
-              OBag.AddValue "EmailAppBeheer", TrakitEmailApplicatiebeheer &amp; ""            
-		  oAPI.AddItem oBag
-              oAPI.ReturnItems 
-              Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5448, EVENT_TYPE_INFORMATION , "Script ENDS.")	
-					    Exit Sub
+#Call function Get-Drive to get information about the Logical Drive.
+$disks = Get-Drive
 
-				    Else
-				    '
-				    ' If the MaxSize is 0 or less, then the drive is unformatted.
-				    ' Do not report on unformatted drives
-				    '
-				        WScript.echo "Drive not formatted " &amp; sDriveLetter
-				        ThrowScriptError " * " &amp; sDriveLetter &amp; "  + Drive not formatted." , Err
-				        Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5448, EVENT_TYPE_INFORMATION , "Script ENDS.")	
-				        Exit Sub
-				    End If ' Is Null Check
-			    End If ' Lable Check   
-			End If ' Drive Type 
-		Next
-	End If
-Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5448, EVENT_TYPE_INFORMATION , "Script ENDS.")
-End Sub
-
-Function ThrowScriptErrorNoAbort(ByVal sMessage, ByVal oErr)
-'
-' ThrowScriptError :: Creates an event and sends it back to the scom server
-'
-'
-
-	Dim sErrDescription, sErrNumber
-	sErrDescription = oErr.Description
-	sErrNumber = oErr.Number
-    Wscript.echo "Error Message is " &amp; sErrDescription &amp; " Error number is " &amp; sErrNumber
-End Function
-
-Function ThrowScriptError(Byval sMessage, ByVal oErr)
-'
-' ThrowScriptError :: Creates an event and sends it back to the scom server
-'
-'
-    On Error Resume Next
-    ThrowScriptErrorNoAbort sMessage, oErr
-	Quit()
-    On Error goto 0
-End Function
-
-
-Function WMIGetObject(ByVal sNamespace)
-'
-' WMIGetObject :: Returns the WMI object requested.
-'
-'
-	Dim oWMI
-    Dim e
-    Set e = New Error
-	On Error Resume Next	
-	Set oWMI = GetObject(sNamespace)
-	e.Save
-	On Error Goto 0
-	If IsEmpty(oWMI) Then
-		ThrowScriptError "Unable to open WMI Namespace '" &amp; sNamespace &amp; "'.  Check to see if the WMI service is enabled and running, and ensure this WMI namespace exists.", e
-	End If
-
-	Set WMIGetObject = oWMI
-
-End Function
-
-
-
-Function WMIGetInstance(ByVal sNamespace, ByVal sInstance)
-'
-' WMIGetInstance :: Returns WMI Instance requested.
-'
-'
-	Dim oWMI, oInstance, nInstanceCount
-    Dim e
-    Set e = New Error
-	On Error Resume Next
-	Set oWMI = GetObject(sNamespace)
-	e.Save
-	On Error Goto 0
-	If IsEmpty(oWMI) Then
-		ThrowScriptError "Unable to open WMI Namespace '" &amp; sNamespace &amp; "'.  Check to see if the WMI service is enabled and running, and ensure this WMI namespace exists.", e
-	End If
-
-	On Error Resume Next
-	Set oInstance = oWMI.InstancesOf(sInstance)
-	e.Save
-	On Error Goto 0
-	If IsEmpty(oInstance) Or e.Number &lt;&gt; 0 Then
-		ThrowScriptError "The class name '" &amp; sInstance &amp; "' returned no instances.  Please check to see if this is a valid WMI class name.", e
-	End If
-
-	'Determine if we queried a valid WMI class - Count will return 0 or empty
-
-	On Error Resume Next
-	nInstanceCount = oInstance.Count
-	e.Save
-	On Error Goto 0
-	If e.Number &lt;&gt; 0 Then
-		ThrowScriptError "The class name '" &amp; sInstance &amp; "' did not return any valid instances.  Please check to see if this is a valid WMI class name.", e
-	End If
-
-	Set WMIGetInstance = oInstance
-
-End Function
-
-Class Error
-    Private m_lNumber
-    Private m_sSource
-    Private m_sDescription
-    Private m_sHelpContext
-    Private m_sHelpFile
-    Public Sub Save()
-        m_lNumber = Err.number
-        m_sSource = Err.Source
-        m_sDescription = Err.Description
-        m_sHelpContext = Err.HelpContext
-        m_sHelpFile = Err.helpfile
-    End Sub
-    Public Sub Raise()
-        Err.Raise m_lNumber, m_sSource, m_sDescription, m_sHelpFile, m_sHelpContext
-    End Sub
-    Public Sub Clear()
-        m_lNumber = 0
-        m_sSource = ""
-        m_sDescription = ""
-        m_sHelpContext = ""
-        m_sHelpFile = ""
-    End Sub
-    Public Default Property Get Number()
-        Number = m_lNumber
-    End Property
-    Public Property Get Source()
-        Source = m_sSource
-    End Property
-    Public Property Get Description()
-        Description = m_sDescription
-    End Property
-    Public Property Get HelpContext()
-        HelpContext = m_sHelpContext
-    End Property
-    Public Property Get HelpFile()
-        HelpFile = m_sHelpFile
-    End Property    
-End Class
-
-Function MomCreateObject(ByVal sProgramId)
-    Dim oError
-    Set oError = New Error
+foreach ($disk in $disks) {
+    if ($disk.DriveLetter -eq $driveLetter) {
+        if (Test-Path "$($disk.DriveLetter)\$NoAlertFile") {
+            $script:ErrorMessages += "`nAlerts disabled for drive $disk.DriveLetter."
+            continue
+        }
     
-	On Error Resume Next
-	Set MomCreateObject = CreateObject(sProgramId)
-	oError.Save
-	On Error Goto 0
-	
-	If oError.Number &lt;&gt; 0 Then ThrowScriptError "Unable to create automation object '" &amp; sProgramId &amp; "'", oError
-End Function
+        $thresholds = Get-DriveThresholds -driveLetter $driveLetter
 
-Function IsValidObject(ByVal oObject)
-    IsValidObject = False
-    
-    If IsObject(oObject) Then
-        If Not oObject Is Nothing Then
-            IsValidObject = True
-        End If
-    End If
-End Function	
+        $state, $percentFree = Check-DriveSpace -disk $disk `
+            -Drive $driveLetter `
+            -WarningPercentageThreshold $thresholds["WarningPercentage"] `
+            -ErrorPercentageThreshold $thresholds["ErrorPercentage"] `
+            -WarningAbsoluteThreshold $DefaultSystemDriveWarningAbsolute `
+            -ErrorAbsoluteThreshold $DefaultSystemDriveErrorAbsolute
 
-Function WMIExecQuery(ByVal sNamespace, ByVal sQuery)
-'
-' WMIExecQuery :: Executes the WMI query and returns the result set.
-'
-'
-	Dim oWMI, oQuery, nInstanceCount
-	Dim e
-	Set e = New Error
-	On Error Resume Next
-	Set oWMI = GetObject(sNamespace)
-	e.Save
-	On Error Goto 0
-	If IsEmpty(oWMI) Then
-		ThrowScriptError "Unable to open WMI Namespace '" &amp; sNamespace &amp; "'.  Check to see if the WMI service is enabled and running, and ensure this WMI namespace exists.", e
-	End If
+        if ($disk.BootDisk -eq $True) {
+                $isBootDisk = "Ja"
+            }
+            else {
+                $isBootDisk = "Nee"
+            }
 
-	On Error Resume Next
-	Set oQuery = oWMI.ExecQuery(sQuery)
-	e.Save
-	On Error Goto 0
-	If IsEmpty(oQuery) Or e.Number &lt;&gt; 0 Then
-		ThrowScriptError "The Query '" &amp; sQuery &amp; "' returned an invalid result set.  Please check to see if this is a valid WMI Query.", e
-	End If
+        $propertyBag.AddValue("WarningPercentage", $thresholds.WarningPercentage)
+        $propertyBag.AddValue("ErrorPercentage", $thresholds.ErrorPercentage)
+        $propertyBag.AddValue("WarningAbsolute", $DefaultSystemDriveWarningAbsolute)
+        $propertyBag.AddValue("ErrorAbsolute", $DefaultSystemDriveErrorAbsolute)
+        $propertyBag.AddValue("PercentFree", $([math]::Round($percentFree, 2)))
+        $propertyBag.AddValue("TotalSize", $disk.TotalSpace)
+        $propertyBag.AddValue("FreeSpace", $disk.FreeSpace)
+        $propertyBag.AddValue("IsBootDisk", $isBootDisk)
+        $propertyBag.AddValue("Result", $state)
+    }
+}
 
-	'Determine if we queried a valid WMI class - Count will return 0 or empty
-	On Error Resume Next
-	nInstanceCount = oQuery.Count
-	e.Save
-	On Error Goto 0
-	If e.Number &lt;&gt; 0 Then
-		ThrowScriptError "The Query '" &amp; sQuery &amp; "' did not return any valid instances.  Please check to see if this is a valid WMI Query.", e
-	End If
+# Consolidated Error Reporting
+if ($ErrorMessages.Count -gt 0) {
+    $momapi.LogScriptEvent($ScriptName, $ErrorEventID, 1, "`nThe following events were detected during script execution:`n$($ErrorMessages -join "`n")")
+}
 
-	Set WMIExecQuery = oQuery
+# Return Property Bag to SCOM
+$propertyBag
+#=================================================================================
+# End of script section
 
-End Function
-
-
-Function Is_Win32_Volume_Supported()
-	Dim objWMISet, objWMIOS, blnRet
-
-	blnRet = False
-	Set objWMISet = WMIGetInstance("winmgmts:\\" &amp; TargetComputer &amp; "\root\cimv2", "Win32_OperatingSystem")
-	For each objWMIOS in objWMISet
-		If CLng(objWMIOS.BuildNumber) &gt;= 3624 Then blnRet = True
-	Next
-	Is_Win32_Volume_Supported = blnRet
-End Function
-
-Function Is_System_Drive(sDriveLetter)
-	Dim objWMISet, objWMIOS
-	Is_System_Drive = False
-
-	Set objWMISet = WMIGetInstance("winmgmts:\\" &amp; TargetComputer &amp; "\root\cimv2", "Win32_OperatingSystem")
-	For each objWMIOS in objWMISet
-		Dim sSystemDrive
-		sSystemDrive = Left(objWMIOS.SystemDirectory, 2)
-		If sSystemDrive = sDriveLetter Then
-			Is_System_Drive = True
-		End If
-	Next
-End Function
-
-Function Get_Trakit_Email_Applicatiebeheer()
-	Dim objWMISet, objWMITrakit, Email_Applicatiebeheer, Email_contact_A
-	Get_Trakit_Email_Applicatiebeheer = "Onbekend"
-	On Error Resume Next
-	Set objWMISet = WMIGetInstance("winmgmts:\\" &amp; TargetComputer &amp; "\root\cimv2", "UMC_Trakit_Info")
-		For each objWMITrakit in objWMISet
-			Email_Applicatiebeheer = objWMITrakit.Email_applicatiebeheer
-			Email_contact_A = objWMITrakit.Email_contact_A
-		Next
-	On Error Goto 0	
-	IF Email_contact_A = "Onbekend" Then 
-		Get_Trakit_Email_Applicatiebeheer = Email_Applicatiebeheer
-	ElseIf Email_contact_A &lt;&gt; "" Then 
-		Get_Trakit_Email_Applicatiebeheer = Email_Applicatiebeheer &amp; ";" &amp; Email_contact_A
-	ELSE
-		Get_Trakit_Email_Applicatiebeheer = Email_Applicatiebeheer
-	End If
-End Function
-
-' VBScript source code
-
-'*********************************************************************
-' Routine: Function CollectNewThreshold(sDriveLetter)
-' Purpose: Checks for the file DiskThreshold.MOM existing on the drive that the threshold needs to be changed on.
-'	This file should contain alert threshold values for that drive.
-'	Single line in file should contain RedAlertPercentvalue,YellowAlertPercentvalue
-'	EXAMPLE:  3,10
-'	This would be a 3% threshold for RED (critical) alerts, and 10% threshold for YELLOW (warning) alerts
-'**********************************************************************
-
-Function CollectNewThreshold(sDriveLetter)
-
-	Dim oThresholdFile
-	Dim sThresholdFile
-	Dim sThresholds
-	Dim oFSO
-	Dim aArray
-	Dim aArray2
-
-	sThresholdFile = sDriveLetter &amp; "\DiskThreshold.MOM"
-	Set oFSO = CreateObject("Scripting.FileSystemObject")
-		
-	If oFSO.FileExists(sThresholdFile) Then
-		Set oThresholdFile = oFSO.OpenTextFile(sThresholdFile, 1)
-       	On Error Resume Next
-       	sThresholds = oThresholdFile.ReadAll
-		aArray = Split(sThresholds, vbcrlf)
-		oThresholdFile.Close
-		On Error goto 0
-		Set oFSO = Nothing
-		If Ubound(aArray) =&gt; 0 Then 'If the file has contents, continue ' gjm 10-22-2007- change to Ubound(aArray) = &gt; 0 instead of Ubound(aArray) = 1
-                			aArray2 = Split(aArray(0), ",")
-Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5449, EVENT_TYPE_INFORMATION , "Using CollectNewThreshold function.")
-
-
-			If Ubound(aArray2) = 1 Then 'If the file has parm1,parm2, continue
-                        		If aArray2(0) =&gt;100 Or  aArray2(1) =&gt;100 Then 'percentage thresholds greater than 100-oops!
-					Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5441, EVENT_TYPE_ERROR , "\DiskThreshold.MOM (first or second value)" &amp;_
-					 							"for drive " &amp; sDriveLetter &amp; " has a percentage threshold greater than or equal to 100." &amp;_ 
-												"Value must be LESS than 100. File contents (single line) MUST be entered as follows: " &amp;_
-												"CriticalPercentThreshold,WarningPercentThreshold.")
-		 			CollectNewThreshold = False
-		 		Else
-			 		CollectNewThreshold = True
-					If Is_System_Drive(sDriveLetter) Then
-						THRESHOLD_SYSTEM_PCT_RED = aArray2(0)
-						THRESHOLD_SYSTEM_PCT_YELLOW = aArray2(1)
-						Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5444, EVENT_TYPE_INFORMATION , "\DiskThreshold.MOM was detected, " &amp;_
-													"and is being applied to disk " &amp; sDriveLetter &amp; ".")
-					Else
-						THRESHOLD_PCT_RED  = aArray2(0)
-						THRESHOLD_PCT_YELLOW  = aArray2(1)
-						Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5444, EVENT_TYPE_INFORMATION , "\DiskThreshold.MOM was detected, " &amp;_
-													"and is being applied to disk " &amp; sDriveLetter &amp; ".")
-					End If
-				End If
-			Else
-				'Incorrect number of threshold parameters in file
-					Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5442, EVENT_TYPE_ERROR , "\DiskThreshold.MOM was detected, " &amp;_
-												"but the correct number of thresholds have not been defined. " &amp;_
-												"For drive " &amp; sDriveLetter &amp; " Remove File or correct thresholds." &amp;_
-												"File contents (single line) MUST be entered as follows: CriticalPercentThreshold,WarningPercentThreshold.")
-	
-		 		CollectNewThreshold = False
-		 	End If
-		 Else
-		 	'File Exists, but no thresholds defined.
-		 	Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5443, EVENT_TYPE_ERROR , "\DiskThreshold.MOM was detected, " &amp;_
-										"but appears to be empty. File contents (single line) MUST be entered " &amp;_
-										"as follows: CriticalPercentThreshold,WarningPercentThreshold.")
-		 End If
-	Else
-		' No File
-		CollectNewThreshold = False
-	End If
-End Function
-
-
-'*********************************************************************
-' Routine: Function IsDriveExcluded(sDriveLetter)
-' Purpose: To determine if drive is exclude or not.
-'	   If a file named NoDiskAlerts.MOM exists on the drive, then exclude
-'			
-'**********************************************************************
-
-Function IsDriveExcluded(sDriveLetter)
-	Dim sExcludeFile
-	Dim oFSO
-	
-	IsDriveExcluded = False
-	sExcludeFile = sDriveLetter &amp; "\NoDiskAlerts.MOM"
-	Set oFSO = CreateObject("Scripting.FileSystemObject")
-
-	If oFSO.FileExists(sExcludeFile) Then
-		IsDriveExcluded = True
-Call objAPI.LogScriptEvent("om07FreeSpaceRev1m.vbs ",5450, EVENT_TYPE_INFORMATION , "Using Drive excluded Function")
-	Else
-		IsDriveExcluded = False
-	End If
-	
-	Set oFSO = Nothing
-End Function
+# Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$script:ScriptOutput += "`nScript Completed, Runtime: ($ScriptTime) seconds."
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"$($ScriptOutput)")
+#=================================================================================
