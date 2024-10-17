@@ -36,72 +36,59 @@ $DefaultDriveErrorPercentage = 5
 
 function Check-DriveSpace {
     param (
-        [PSCustomObject]$disk,
-        [string]$Drive,
+        [PSCustomObject]$logicalDisk,
+        [string]$DriveLetter,
         [int]$WarningPercentageThreshold,
         [int]$ErrorPercentageThreshold,
         [int64]$WarningAbsoluteThreshold,
         [int64]$ErrorAbsoluteThreshold
     )
 
-    if ($disk.TotalSpace -eq 0) {
-        $script:ErrorMessages += "`nDrive $Drive cannot be checked."
+    if ($logicalDisk.TotalSpace -eq 0) {
+        $script:ErrorMessages += "`nDrive $DriveLetter cannot be checked."
         return $null
     }
 
-    $percentFree = ($disk.FreeSpace / $disk.TotalSpace) * 100
+    $percentFree = ($logicalDisk.FreeSpace / $logicalDisk.TotalSpace) * 100
     $state = "Healthy"
 
-    if ($disk.BootDisk -eq $False -and $percentFree -lt $ErrorPercentageThreshold) {
-		$script:ErrorMessages += "`nDrive $Drive is below percentage error threshold: $([math]::Round($percentFree, 2))% free, $($disk.FreeSpace) GB free."
+    if ($logicalDisk.BootDisk -eq $False -and $percentFree -lt $ErrorPercentageThreshold) {
+		$script:ErrorMessages += "`nDrive $DriveLetter is below percentage error threshold: $([math]::Round($percentFree, 2))% free, $($logicalDisk.FreeSpace) GB free."
         $state = "Error"
     }
-    elseif ($disk.BootDisk -eq $False -and $percentFree -lt $WarningPercentageThreshold) {
-        $script:ErrorMessages += "`nDrive $Drive is below percentage warning threshold: $([math]::Round($percentFree, 2))% free, $($disk.FreeSpace) GB free."
+    elseif ($logicalDisk.BootDisk -eq $False -and $percentFree -lt $WarningPercentageThreshold) {
+        $script:ErrorMessages += "`nDrive $DriveLetter is below percentage warning threshold: $([math]::Round($percentFree, 2))% free, $($logicalDisk.FreeSpace) GB free."
         $state = "Warning"
     }
     
-    if ($disk.BootDisk -eq $True -and $disk.FreeSpace -lt $ErrorAbsoluteThreshold) {
-        $script:ErrorMessages += "`nDrive $Drive is below absolute error threshold: $([math]::Round($percentFree, 2))% free, $($disk.FreeSpace) GB free."
+    if ($logicalDisk.BootDisk -eq $True -and $logicalDisk.FreeSpace -lt $ErrorAbsoluteThreshold) {
+        $script:ErrorMessages += "`nDrive $DriveLetter is below absolute error threshold: $([math]::Round($percentFree, 2))% free, $($logicalDisk.FreeSpace) GB free."
         $state = "Error"
     }
-    elseif ($disk.BootDisk -eq $True -and $disk.FreeSpace -lt $WarningAbsoluteThreshold) {
-        $script:ErrorMessages += "`nDrive $Drive is below absolute warning threshold: $([math]::Round($percentFree, 2))% free, $($disk.FreeSpace) GB free."
+    elseif ($logicalDisk.BootDisk -eq $True -and $logicalDisk.FreeSpace -lt $WarningAbsoluteThreshold) {
+        $script:ErrorMessages += "`nDrive $DriveLetter is below absolute warning threshold: $([math]::Round($percentFree, 2))% free, $($logicalDisk.FreeSpace) GB free."
         $state = "Warning"
     }
 
     return $state, $percentFree
 }
 
-function Get-Drive {
-    $disks = @()
-
-    foreach($disk in Get-CimInstance Win32_Diskdrive) {
-        $diskMetadata = Get-Disk | Where-Object { $_.Number -eq $disk.Index } | Select-Object -First 1
-        $partitions = Get-CimAssociatedInstance -ResultClassName Win32_DiskPartition -InputObject $disk
-
-        foreach($partition in $partitions) {
-            $drives = Get-CimAssociatedInstance -ResultClassName Win32_LogicalDisk -InputObject $partition
-
-            foreach($drive in $drives) {
-                $totalSpace = [math]::Round($drive.Size / 1GB, 3)
-                $freeSpace  = [math]::Round($drive.FreeSpace / 1GB, 3)
-                $usedSpace  = [math]::Round($totalSpace - $freeSpace, 3)
-
-                $volume     = Get-Volume | Where-Object { $_.DriveLetter -eq $drive.DeviceID.Trim(":") } | Select-Object -First 1
-                
-                $disks += [PSCustomObject]@{
-                    DriveLetter = $drive.DeviceID
-                    BootDisk    = $diskMetadata.BootFromDisk
-                    TotalSpace  = $totalSpace
-                    FreeSpace   = $freeSpace
-                    UsedSpace   = $usedSpace
-                }
-            }
-        }
-    }
-
-    return $disks
+function Get-DriveInfo {
+    param ([string]$driveLetter)
+    $logicalDiskInfo = Get-CimInstance -ClassName win32_volume | where-object {$_.DriveLetter -eq $driveLetter} | Select-Object BootVolume, Capacity, DriveLetter, FreeSpace
+    
+    $totalSpace = [math]::Round($logicalDiskInfo.Capacity / 1GB, 3)
+    $freeSpace  = [math]::Round($logicalDiskInfo.FreeSpace / 1GB, 3)
+    $usedSpace  = [math]::Round($totalSpace - $freeSpace, 3)
+         
+    $logicalDisk += [PSCustomObject]@{
+        DriveLetter = $logicalDiskInfo.DriveLetter
+        BootDisk    = $logicalDiskInfo.BootVolume
+        TotalSpace  = $totalSpace
+        FreeSpace   = $freeSpace
+        UsedSpace   = $usedSpace               
+     }
+    return $logicalDisk
 }
 
 function Get-DriveThresholds {
@@ -144,57 +131,73 @@ function Get-DriveThresholds {
     return $thresholds
 }
 
-#Call function Get-Drive to get information about the Logical Drive.
-$disks = Get-Drive
+#Call function Get-DriveInfo to get information about the Logical Drive.
+$logicalDisk = Get-DriveInfo -driveLetter $driveLetter
 
-foreach ($disk in $disks) {
-    if ($disk.DriveLetter -eq $driveLetter) {
-        if (Test-Path "$($disk.DriveLetter)\$NoAlertFile") {
-            $script:ErrorMessages += "`nAlerts disabled for drive $disk.DriveLetter."
-            continue
-        }
+
+if (Test-Path "$($driveLetter)\$NoAlertFile") {
+    $script:AlertDescription = @()
+    $script:ErrorMessages += "`nAlerts disabled for drive $driveLetter"
+    $state = "Healthy"
+
+    $propertyBag.AddValue("Result", $state)
+    $propertyBag
+}
+    else {
+    $thresholds = Get-DriveThresholds -driveLetter $driveLetter
+
+    $state, $percentFree = Check-DriveSpace -logicalDisk $logicalDisk `
+        -DriveLetter $driveLetter `
+        -WarningPercentageThreshold $thresholds["WarningPercentage"] `
+        -ErrorPercentageThreshold $thresholds["ErrorPercentage"] `
+        -WarningAbsoluteThreshold $DefaultSystemDriveWarningAbsolute `
+        -ErrorAbsoluteThreshold $DefaultSystemDriveErrorAbsolute
     
-        $thresholds = Get-DriveThresholds -driveLetter $driveLetter
-
-        $state, $percentFree = Check-DriveSpace -disk $disk `
-            -Drive $driveLetter `
-            -WarningPercentageThreshold $thresholds["WarningPercentage"] `
-            -ErrorPercentageThreshold $thresholds["ErrorPercentage"] `
-            -WarningAbsoluteThreshold $DefaultSystemDriveWarningAbsolute `
-            -ErrorAbsoluteThreshold $DefaultSystemDriveErrorAbsolute
-
-        if ($disk.BootDisk -eq $True) {
-                $isBootDisk = "Ja"
-            }
+    if ($state -ne "Healthy") {
+        $propertyBag.AddValue("PercentFree", $([math]::Round($percentFree, 2)))
+        $propertyBag.AddValue("TotalSize", $logicalDisk.TotalSpace)
+        $propertyBag.AddValue("FreeSpace", $logicalDisk.FreeSpace)
+        #$propertyBag.AddValue("IsBootDisk", $isBootDisk)
+        
+        if ($logicalDisk.BootDisk -eq $True) {
+            $isBootDisk = "Ja"
+            $script:AlertDescription += "De drempel waarden voor deze disk zijn:`n"
+            $script:AlertDescription += "Disk warning: $DefaultSystemDriveWarningAbsolute GB and Disk error: $DefaultSystemDriveErrorAbsolute GB`n"
+            $script:AlertDescription += "Let op! De schijf waarop het besturingssysteem staat geïnstalleerd is niet aan te passen via het bestand ' DiskThreshold.MOM ', er zijn hiervoor vaste waardes toegekend.`n"
+            $propertyBag.AddValue("AlertDescription","$($AlertDescription)")
+         }
             else {
                 $isBootDisk = "Nee"
+                $script:AlertDescription += "De drempel waarden voor deze disk zijn:`n"
+                $script:AlertDescription += "Disk warning: $thresholds.WarningPercentage % and Disk error: $thresholds.ErrorPercentage %`n"
+                $script:AlertDescription += "Als op deze disk een andere warning of error level moet worden toegekend, maak dan een bestand in de root van deze disk aan met de naam ' DiskThreshold.MOM ' met daarin de volgende regels zoals in onderstaand voorbeeld:`n"
+                $script:AlertDescription += "WarningPercentage = 5`n"
+                $script:AlertDescription += "ErrorPercentage = 1`n"
+                $propertyBag.AddValue("AlertDescription","$($AlertDescription)")
             }
+            $propertyBag.AddValue("IsBootDisk", $isBootDisk)
 
-        $propertyBag.AddValue("WarningPercentage", $thresholds.WarningPercentage)
-        $propertyBag.AddValue("ErrorPercentage", $thresholds.ErrorPercentage)
-        $propertyBag.AddValue("WarningAbsolute", $DefaultSystemDriveWarningAbsolute)
-        $propertyBag.AddValue("ErrorAbsolute", $DefaultSystemDriveErrorAbsolute)
-        $propertyBag.AddValue("PercentFree", $([math]::Round($percentFree, 2)))
-        $propertyBag.AddValue("TotalSize", $disk.TotalSpace)
-        $propertyBag.AddValue("FreeSpace", $disk.FreeSpace)
-        $propertyBag.AddValue("IsBootDisk", $isBootDisk)
-        $propertyBag.AddValue("Result", $state)
     }
-}
 
-# Consolidated Error Reporting
-if ($ErrorMessages.Count -gt 0) {
-    $momapi.LogScriptEvent($ScriptName, $ErrorEventID, 1, "`nThe following events were detected during script execution:`n$($ErrorMessages -join "`n")")
-}
+    $propertyBag.AddValue("Result", $state)
 
-# Return Property Bag to SCOM
-$propertyBag
+    # Return Property Bag to SCOM
+    $momapi.Return($propertyBag)
+    $propertyBag
+}
 #=================================================================================
-# End of script section
+# End of MAIN script section
 
 # Log an event for script ending and total execution time.
 $EndTime = Get-Date
 $ScriptTime = ($EndTime - $StartTime).TotalSeconds
-$script:ScriptOutput += "`nScript Completed, Runtime: ($ScriptTime) seconds."
+$script:ScriptOutput += "`nScript Completed, runtime: ($ScriptTime) seconds."
+$script:ScriptOutput += "`nStatus logical disk: $state."
+
+# Consolidated Error Reporting
+if ($ErrorMessages.Count -gt 0) {
+    $script:ScriptOutput += "`n$($ErrorMessages -join "`n")"
+}
+
 $momapi.LogScriptEvent($ScriptName,$EventID,0,"$($ScriptOutput)")
 #=================================================================================
